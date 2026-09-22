@@ -142,8 +142,9 @@ Study-Mate/
 ```
 
 > **About this repository:** [`zeeshanshaikh-dev/StudyMate-AI`](https://github.com/zeeshanshaikh-dev/StudyMate-AI)
-> hosts the project docs (`README.md`, `StudyMate_AI_PRD_v3.md`) and the Supabase schema.
-> The application code lives in the `frontend/` and `backend/` repos linked above.
+> hosts just the project docs (`README.md`, `StudyMate_AI_PRD_v3.md`).
+> The application code lives in the `frontend/` and `backend/` repos linked above; the
+> Supabase schema lives with the full project workspace (see Getting started → Database).
 
 ---
 
