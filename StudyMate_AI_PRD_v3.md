@@ -1,11 +1,18 @@
 # StudyMate AI — Product Requirements Document (PRD)
 
-**Version:** 3.0
+**Version:** 3.1
 **Status:** Reference for the shipped application (supersedes `StudyMate_AI_PRD_v2.md`)
 **Product:** StudyMate AI
 **Type:** AI-powered educational web application
 **Interaction:** Text-based (voice/video explicitly out of scope)
 **Target:** College students and independent learners
+
+> **What changed in v3.1.** Documents the current production build: the redesigned visual
+> language (warm-neutral canvas, lime accent, NavRail/BottomNav shell), GitHub-style study
+> heatmap with streaks, weekly study goal, AI practice quizzes targeting weak topics,
+> a missed-question redo quiz, and the in-app PDF reader that sits beside the tutor
+> (react-pdf, deep-linked from source citations). These features reuse existing study-session,
+> quiz, weak-area, and document data — no new tables.
 
 > **What changed in v3.** This revision documents the project as actually implemented and
 > deployed: tutor personas, AI flashcards with SM-2 spaced repetition, weak-topic analytics,
@@ -28,6 +35,7 @@
 | Charts | Recharts 3 |
 | Markdown (tutor) | `react-markdown` + `remark-gfm` |
 | Uploads | `react-dropzone` |
+| PDF reader | `react-pdf` 11 (`pdfjs-dist` worker, lazy code-split chunk) |
 | Backend | Python + FastAPI + Uvicorn + Pydantic v2 |
 | Auth | Supabase Auth (email/password) |
 | Database | Supabase PostgreSQL |
@@ -83,6 +91,17 @@ tutor personas), generate quizzes and flashcards, and track learning progress.
 17. Responsive SaaS-style UI (sidebar drawer, adaptive grids, mobile-safe popovers).
 18. Full auth set: register + email confirmation, login, resend confirmation, forgot /
     reset password (PKCE recovery link), logout, protected routes, session restore.
+19. **GitHub-style study heatmap** (182-day, zero-filled) with **current/longest streak**
+    counters on Progress and a 🔥 streak banner on the Dashboard.
+20. **Weekly study goal** tile on the Dashboard (capsule bars + % progress), stored as
+    `weekly_goal_minutes` in Supabase user metadata — no new table.
+21. **Practice weak topics** — generates an AI quiz whose prompt targets the subject's
+    lowest-accuracy topic labels (`topics` on the generate endpoint).
+22. **Redo as quiz** — rebuilds a quiz (up to 20 questions, most-missed first) from the
+    subject's missed-question bank; attempts flow through the normal quiz/progress pipeline.
+23. **In-app PDF reader** (react-pdf): side-by-side with the tutor on desktop (xl+),
+    full-screen below xl; source-citation chips deep-link `?doc=&page=` to the exact page;
+    Notes offers **Open in AI tutor** with the reader.
 
 ---
 
@@ -103,16 +122,22 @@ redirect to `/`. `/reset-password` intentionally sits outside the guest-only wra
 PKCE recovery flow can land on it.
 
 ## Visual direction
-Soft light-gray page background, white cards, rounded corners, thin borders, subtle shadows,
-strong type hierarchy, restrained single accent (`primary`) plus semantic success/warning/error
-colors, compact Lucide icons, generous whitespace. Fully dark-mode aware via themed CSS
-variables (`--surface`, `--primary-soft`, …) and the `sm-theme` preference flag.
+Warm-neutral canvas (`#F4F5F2`), charcoal ink, and a lime accent (`#E9FF5A`) reserved for
+AI moments, progress, and active states; flat cards with soft radii, strong type hierarchy
+(semibold headings), compact Lucide icons, semantic success/warning/error colors, generous
+whitespace. App shell: fixed **NavRail** on desktop, **BottomNav** on mobile, flat `PageHeader`,
+`AuthShell` for auth screens; shared `StatCard`/`Spinner` primitives and design tokens in
+`src/index.css`. Fully dark-mode aware via themed CSS variables and the `sm-theme` preference
+flag.
 
 ## Key interaction details
 - Tutor replies render Markdown; citations render as compact source chips with filename and page.
 - Quiz attempts submit answers to the backend; the **backend** computes correctness and score.
 - Flashcards expose a review queue; each card schedules its next review on the server (SM-2).
 - Study time is measured by heartbeats, not page views.
+- Clicking a citation chip (or Notes → **Tutor**) opens the PDF reader on that page:
+  side-by-side with the chat at `xl+`, full-screen below `xl`; the reader renders pages in
+  lazy batches and is code-split out of the main bundle.
 
 ---
 
@@ -154,6 +179,8 @@ Migrations live in `supabase/migrations/`:
   storage bucket + policies.
 - **002_weak_topics_flashcards_persona.sql** — `quiz_questions.topic`, `conversations.persona`,
   `flashcards` table (SM-2 columns), RLS for flashcards.
+- **002_quiz_note_source.sql** — nullable `quizzes.document_id` (+ index) so a quiz can be
+  generated from a single uploaded note.
 
 ## Tables
 | Table | Notes |
@@ -164,12 +191,15 @@ Migrations live in `supabase/migrations/`:
 | `messages` | conversation_id, role check (`user,assistant`), content, **sources jsonb** |
 | `documents` | subject_id, user_id, filename, storage_path, mime_type, size, `processing_status` check, error, page_count |
 | `document_chunks` | document_id, subject_id, user_id, chunk_index, chunk_text, page_number, **embedding vector(768)** |
-| `quizzes` | subject_id, user_id, title, difficulty check, question_count, source_type check |
+| `quizzes` | subject_id, user_id, title, difficulty check, question_count, source_type check, **document_id** (nullable single-note source) |
 | `quiz_questions` | quiz_id, question_text, options jsonb, correct_answer, explanation, order, **topic** |
 | `quiz_attempts` | quiz_id, user_id, score, total_questions, started_at, completed_at |
 | `quiz_answers` | attempt_id, question_id, selected_answer, is_correct (server-computed) |
 | `study_sessions` | user_id, subject_id, started_at, ended_at, duration_seconds, last_heartbeat_at |
 | `flashcards` | user_id, subject_id, source_document_id, front, back, **ease_factor, interval_days, repetitions, due_at**, last_reviewed_at |
+
+The weekly study goal (`weekly_goal_minutes`) lives in Supabase **user metadata**
+(`auth.users.raw_user_meta_data`), not in a table.
 
 ## Embedded generation details
 - Embeddings: `gemini-embedding-2`, exact 768-dim check enforced server-side.
@@ -236,12 +266,18 @@ Prompt structure: `PERSONA SYSTEM PROMPT + RETRIEVED STUDY MATERIAL + CONVERSATI
 # 9. QUIZZES
 
 - Sources: whole subject (`source_type = 'subject'`) or retrieved chunks from uploaded
-  documents (`'documents'`).
+  documents (`'documents'`); optionally scoped to a **single note** via `document_id`.
 - Controls: difficulty `easy | medium | hard`, count 5 / 10 / 15.
 - Generated by Gemini, **validated server-side**, questions tagged with a `topic` for analytics.
 - Attempts: client submits `{answers:[{question_id, selected_answer}]}`; backend computes
   `is_correct`, score, percentage, milestone/attempt history, and returns per-question results
   with explanations.
+- **Weak-topic practice**: the generate endpoint accepts `topics: [..]` (≤10 labels); when
+  present the prompt directs every question at those low-accuracy topics. The Progress page's
+  **Practice weak topics** button passes the subject's weakest labels automatically.
+- **Redo missed**: `POST .../quizzes/redo-missed` copies the subject's most-missed questions
+  (≤20, most-missed first, reusing the weak-areas aggregation) into a new quiz; answering it
+  feeds the same attempts/progress pipeline.
 
 ---
 
@@ -268,6 +304,13 @@ Prompt structure: `PERSONA SYSTEM PROMPT + RETRIEVED STUDY MATERIAL + CONVERSATI
   trend, per-subject performance.
 - **Weak areas** (`/api/progress/weak-areas`): low-accuracy topics + a missed-question bank
   with counts and last-missed timestamps.
+- **Study activity** (`/api/progress/activity?days=182`): daily totals zero-filled across the
+  range for the GitHub-style heatmap, plus `current_streak` / `longest_streak` /
+  `total_days_active`. A day counts when it has any study time; today with no study yet does
+  not break yesterday's streak.
+- **Weekly goal**: the Dashboard computes this week's seconds from the summary's activity
+  chart and shows % of `weekly_goal_minutes` (stored in Supabase user metadata via
+  `auth.updateUser`, no extra table).
 
 ---
 
@@ -284,7 +327,8 @@ Documents         GET/POST         /api/subjects/{subject_id}/documents   (multi
                   GET/DELETE       /api/documents/{document_id}
                   POST             /api/documents/{document_id}/retry
                   GET              /api/documents                        (all subjects)
-Quizzes           POST             /api/subjects/{subject_id}/quizzes/generate
+Quizzes           POST             /api/subjects/{subject_id}/quizzes/generate   (optional topics[])
+                  POST             /api/subjects/{subject_id}/quizzes/redo-missed
                   GET              /api/subjects/{subject_id}/quizzes | /api/quizzes
                   GET/DELETE       /api/quizzes/{quiz_id}
                   POST/GET         /api/quizzes/{quiz_id}/attempts
@@ -295,6 +339,7 @@ Flashcards        GET              /api/subjects/{subject_id}/flashcards
                   DELETE           /api/flashcards/{card_id}
 Progress          GET              /api/dashboard/summary?days=
                   GET              /api/progress
+                  GET              /api/progress/activity?days=                  (heatmap + streaks)
                   GET              /api/progress/weak-areas
                   GET              /api/subjects/{subject_id}/progress
 Study sessions    POST             /api/subjects/{subject_id}/study-sessions/start
@@ -352,9 +397,10 @@ production (not localhost).
 
 # 15. TESTING
 
-- Backend: `pytest` + `pytest-asyncio` (auth validation, ownership, document status
-  transitions, RAG filtering, quiz validation/scoring, progress math).
-- Frontend: Oxlint (`npm run lint`); `tsc -b && vite build` gate.
+- Backend: `pytest` + `pytest-asyncio` — **38 tests** (auth validation, ownership, document
+  status transitions, RAG filtering, quiz validation/scoring, progress math, streak
+  derivation, weak-topic prompt targeting, redo-quiz assembly).
+- Frontend: Oxlint (`npm run lint`, 0-warning gate); `tsc -b && vite build` gate.
 - Required security invariants: User A must never access User B’s subjects, chats, documents,
   quiz attempts, or progress — verified through RLS + service-level ownership checks.
 
@@ -385,3 +431,8 @@ embedding-model change, and deeper spaced-repetition analytics.
 - [x] Study sessions (start/heartbeat/end) and real dashboard + progress metrics.
 - [x] Deployed: Vercel, Render, Supabase Cloud; SPA routes and email redirects verified working.
 - [x] Consistent error format, RLS everywhere, secrets out of git.
+- [x] Study heatmap + streaks (`/api/progress/activity`) on Progress and Dashboard banner.
+- [x] Weekly study goal (user metadata) with capsule-bar progress on the Dashboard.
+- [x] Weak-topic practice quizzes (`topics`) and missed-question redo quizzes.
+- [x] In-app PDF reader beside the tutor (desktop) / full-screen (mobile) with citation
+      deep-links; code-split out of the main bundle.

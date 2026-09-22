@@ -4,7 +4,7 @@
 
 ### Your AI-powered personal study companion
 
-**Organize subjects · Upload notes · Learn with an AI tutor · Quiz yourself · Master flashcards**
+**Organize subjects · Upload notes · Learn with an AI tutor · Quiz yourself · Master flashcards · Build your streak**
 
 Built with **React + Vite + Tailwind CSS**, **FastAPI**, **Supabase** (Postgres + pgvector + Auth + Storage), and **Google Gemini**.
 
@@ -27,9 +27,10 @@ The complete learning loop, end-to-end:
 | 📄 **Notes** | Upload **PDF / TXT** (up to 50 MB) into private storage with live processing status |
 | 🧠 **AI Tutor** | Gemini-powered tutor with **Markdown** answers, **source citations**, conversation history, and 4 teaching **personas** (Default, Feynman, Exam, Socratic) |
 | 🔍 **RAG** | Retrieval-Augmented Generation: your questions are embedded and matched against your notes via **pgvector** cosine search |
-| 🧪 **Quizzes** | AI-generated MCQs (subject- or document-grounded) with strict validation, server-side scoring, explanations & **weak-topic analytics** |
+| 🧪 **Quizzes** | AI-generated MCQs (subject- or document-grounded) with strict validation, server-side scoring, explanations & **weak-topic analytics** — plus **Practice weak topics** (AI quiz targeted at your lowest-accuracy topics) and **Redo as quiz** (rebuilds a quiz from your most-missed questions) |
 | 🗂️ **Flashcards** | AI-generated flashcard decks with **SM-2 spaced repetition** (Again / Hard / Good / Easy) |
-| 📊 **Progress** | Real study-time tracking (heartbeat sessions), dashboard stats, activity charts, quiz trends |
+| 📊 **Progress** | Real study-time tracking (heartbeat sessions), dashboard stats, activity charts, quiz trends, a **GitHub-style study heatmap** with 🔥 **current/longest streaks**, and a **weekly study goal** with capsule-bar progress |
+| 📖 **PDF reader** | In-app reader (**react-pdf**) side-by-side with the tutor on desktop and full-screen on mobile — source citations deep-link to the exact page; open any note in the tutor straight from Notes |
 | 🔎 **Search** | Global quick-search across subjects, notes & quizzes (Ctrl/⌘+K) |
 | 🌗 **Theme** | Light / Dark / System with a polished, responsive Core-style SaaS UI |
 
@@ -50,6 +51,7 @@ The complete learning loop, end-to-end:
 | [Recharts 3](https://recharts.org) | Activity & progress charts |
 | [react-markdown](https://github.com/remarkjs/react-markdown) + [remark-gfm](https://github.com/remarkjs/remark-gfm) | Markdown tutor answers |
 | [react-dropzone](https://react-dropzone.js.org) | Drag‑and‑drop file uploads |
+| [react-pdf](https://wojtekmaj.github.io/react-pdf/) | In-app PDF reader (pdf.js worker, code-split chunk) |
 | [@supabase/supabase-js](https://supabase.com/docs/reference/javascript) | Auth client |
 | [Oxlint](https://oxc.rs) | Linting |
 
@@ -90,6 +92,7 @@ The complete learning loop, end-to-end:
 │  Pages     TanStack Query    │  Bearer  │  Routers ──► Services                 │
 │  Auth      axios             │   JWT    │   subjects/docs/chats/quizzes/        │
 │  Theme     Recharts          │          │   flashcards/progress/sessions        │
+│  Reader    react-pdf         │          │                                      │
 └──────┬───────────────────────┘          │        │        │        │ RAG        │
        │ email links / session           │        │        │        │             │
        ▼                                 ▼        ▼        ▼        ▼             │
@@ -118,7 +121,7 @@ Study-Mate/
 ├── frontend/            # React + Vite SPA       → github.com/zeeshanshaikh-dev/studymate-ai-frontend
 │   ├── src/
 │   │   ├── pages/       # Login, Dashboard, Subjects, Chat, Notes, Quizzes, Flashcards, Progress, Settings, …
-│   │   ├── components/  # layout/, ui/, feature components
+│   │   ├── components/  # layout/, ui/, pdf/ (in-app reader), feature components
 │   │   ├── services/    # typed API clients (subjects, chats, documents, quizzes, flashcards, progress, sessions)
 │   │   ├── lib/         # axios + supabase clients
 │   │   ├── contexts/    # AuthContext
@@ -134,9 +137,13 @@ Study-Mate/
 │       ├── dependencies/# JWT auth
 │       └── db/          # Supabase client
 ├── supabase/
-│   └── migrations/      # 001_initial_schema.sql · 002_weak_topics_flashcards_persona.sql
+│   └── migrations/      # 001_initial_schema · 002_weak_topics_flashcards_persona · 002_quiz_note_source
 └── StudyMate_AI_PRD_v3.md  # The product spec
 ```
+
+> **About this repository:** [`zeeshanshaikh-dev/StudyMate-AI`](https://github.com/zeeshanshaikh-dev/StudyMate-AI)
+> hosts the project docs (`README.md`, `StudyMate_AI_PRD_v3.md`) and the Supabase schema.
+> The application code lives in the `frontend/` and `backend/` repos linked above.
 
 ---
 
@@ -149,10 +156,11 @@ Study-Mate/
 - A [Google AI Studio](https://aistudio.google.com) API key (and optional [Groq](https://console.groq.com/keys) key as fallback)
 
 ### 1. Database
-Run the two migration files in the Supabase **SQL Editor** (in order):
+Run the three migration files in the Supabase **SQL Editor** (in order):
 ```text
 supabase/migrations/001_initial_schema.sql
 supabase/migrations/002_weak_topics_flashcards_persona.sql
+supabase/migrations/002_quiz_note_source.sql
 ```
 Create the private bucket `study-documents` (the migration inserts it if it doesn’t exist).
 
@@ -216,9 +224,9 @@ CORS_ORIGINS=["http://localhost:5173","https://studymate-ai-learning.vercel.app"
 | Chats | `GET/POST /api/subjects/{sid}/chats` · `PATCH/DELETE /api/chats/{id}` |
 | Messages | `GET /api/chats/{id}/messages` · `POST /api/chats/{id}/messages` |
 | Documents | `GET/POST /api/subjects/{sid}/documents` · `GET/DELETE /api/documents/{id}` · `POST /api/documents/{id}/retry` |
-| Quizzes | `POST /api/subjects/{sid}/quizzes/generate` · `GET /api/quizzes` · `GET/POST /api/quizzes/{id}/attempts` |
+| Quizzes | `POST /api/subjects/{sid}/quizzes/generate` *(optional `topics` to target weak spots)* · `POST .../quizzes/redo-missed` · `GET /api/quizzes` · `GET/POST /api/quizzes/{id}/attempts` |
 | Flashcards | `GET /api/subjects/{sid}/flashcards` · `POST .../generate` · `GET /api/flashcards/due` · `POST /api/flashcards/{id}/review` |
-| Progress | `GET /api/dashboard/summary` · `GET /api/progress` · `GET /api/progress/weak-areas` · `GET /api/subjects/{sid}/progress` |
+| Progress | `GET /api/dashboard/summary` · `GET /api/progress` · `GET /api/progress/activity` *(heatmap + streaks)* · `GET /api/progress/weak-areas` · `GET /api/subjects/{sid}/progress` |
 | Study sessions | `POST .../study-sessions/start` · `POST /api/study-sessions/{id}/heartbeat` · `POST .../end` |
 
 Full details: `StudyMate_AI_PRD_v3.md` → §12.
@@ -230,7 +238,7 @@ Full details: `StudyMate_AI_PRD_v3.md` → §12.
 | Frontend | Backend |
 |---|---|
 | `npm run dev` — dev server | `uvicorn app.main:app --reload` — API |
-| `npm run build` — typecheck + build | `pytest` — test suite |
+| `npm run build` — typecheck + build | `pytest` — test suite (38 tests) |
 | `npm run lint` — Oxlint | |
 
 ---
@@ -238,8 +246,8 @@ Full details: `StudyMate_AI_PRD_v3.md` → §12.
 ## 🌱 Roadmap ideas
 - Streaming tutor responses (SSE)
 - Bulk re-indexing when the embedding model changes
-- Subject-based document selection for quizzes/flashcards
 - Deeper spaced-repetition analytics
+- Streak & goal insights (retention nudges built on the study heatmap)
 
 ---
 
